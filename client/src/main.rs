@@ -183,7 +183,11 @@ async fn main() -> anyhow::Result<()> {
             let resp = req.body(content).send().await?;
             if resp.status().is_success() {
                 let id: String = resp.json().await?;
-                println!("Created paste with ID: {}", id);
+                println!(
+                    "Created paste with ID: {}{}",
+                    config.server_url.unwrap_or_else(|| "ERROR".into()),
+                    id
+                );
             } else {
                 eprintln!("Failed: {:?}", resp.text().await?);
             }

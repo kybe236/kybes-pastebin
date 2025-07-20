@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use axum::{
     Json, Router,
@@ -11,6 +12,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
+use tokio::fs;
 use uuid::Uuid;
 
 // ------------------------------
@@ -19,6 +21,11 @@ use uuid::Uuid;
 
 /// Ensure tables exist and create a default admin token if none found.
 async fn setup_database(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    // Create data directory if it doesn't exist
+    if let Err(e) = fs::create_dir_all("./data").await {
+        eprintln!("Failed to create data directory: {}", e);
+    }
+
     // Create tables
     sqlx::query(
         r#"
@@ -29,7 +36,6 @@ async fn setup_database(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         CREATE TABLE IF NOT EXISTS pastes (
             id TEXT PRIMARY KEY,
             owner_token TEXT,
-            content BLOB,
             headers TEXT
         );
         CREATE TABLE IF NOT EXISTS aliases (
@@ -76,6 +82,11 @@ fn get_auth(headers: &HeaderMap) -> Result<String, Json<&'static str>> {
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(String::from)
         .ok_or(Json("Missing or invalid Authorization header"))
+}
+
+/// Get the file path for a paste's content.
+fn get_paste_file_path(paste_id: &str) -> PathBuf {
+    PathBuf::from("./data").join(paste_id)
 }
 
 // ------------------------------
@@ -155,12 +166,17 @@ async fn create_paste(
 
     let paste_id = Uuid::new_v4().to_string();
 
+    // Write content to file
+    let file_path = get_paste_file_path(&paste_id);
+    if let Err(_) = fs::write(&file_path, &content).await {
+        return Err(Json("Failed to write content to file"));
+    }
+
     let header_json = serde_json::to_string(&paste_headers).unwrap_or("{}".to_string());
 
-    sqlx::query("INSERT INTO pastes (id, owner_token, content, headers) VALUES (?, ?, ?, ?)")
+    sqlx::query("INSERT INTO pastes (id, owner_token, headers) VALUES (?, ?, ?)")
         .bind(&paste_id)
         .bind(&token)
-        .bind(&content)
         .bind(&header_json)
         .execute(&pool)
         .await
@@ -339,14 +355,22 @@ async fn get_paste(
         return Json(json!({"error": "Unauthorized"}));
     }
 
-    let row = sqlx::query("SELECT content, headers FROM pastes WHERE id = ?")
+    let row = sqlx::query("SELECT headers FROM pastes WHERE id = ?")
         .bind(&paste_id)
         .fetch_optional(&pool)
         .await;
 
     match row {
         Ok(Some(row)) => {
-            let content: Vec<u8> = row.get("content");
+            // Read content from file
+            let file_path = get_paste_file_path(&paste_id);
+            let content = match fs::read(&file_path).await {
+                Ok(content) => content,
+                Err(_) => {
+                    return Json(json!({"error": "Content file not found"}));
+                }
+            };
+
             let headers_str: String = row.get("headers");
             let headers_map: HashMap<String, String> =
                 serde_json::from_str(&headers_str).unwrap_or_default();
@@ -392,6 +416,7 @@ async fn delete_paste(
             .is_some();
 
     if is_owner || is_admin(&pool, &body.token).await {
+        // Delete from database
         let _ = sqlx::query("DELETE FROM pastes WHERE id = ?")
             .bind(&body.paste_id)
             .execute(&pool)
@@ -400,6 +425,11 @@ async fn delete_paste(
             .bind(&body.paste_id)
             .execute(&pool)
             .await;
+
+        // Delete content file
+        let file_path = get_paste_file_path(&body.paste_id);
+        let _ = fs::remove_file(&file_path).await;
+
         Json("Deleted")
     } else {
         Json("Unauthorized")
@@ -417,14 +447,20 @@ async fn get_paste_by_id_or_alias(
         .unwrap_or(None)
         .unwrap_or(id_or_alias);
 
-    let row = sqlx::query("SELECT content, headers FROM pastes WHERE id = ?")
+    let row = sqlx::query("SELECT headers FROM pastes WHERE id = ?")
         .bind(&paste_id)
         .fetch_optional(&pool)
         .await;
 
     match row {
         Ok(Some(row)) => {
-            let content: Vec<u8> = row.get("content");
+            // Read content from file
+            let file_path = get_paste_file_path(&paste_id);
+            let content = match fs::read(&file_path).await {
+                Ok(content) => content,
+                Err(_) => return StatusCode::NOT_FOUND.into_response(),
+            };
+
             let headers_str: String = row.get("headers");
             let headers_map: HashMap<String, String> =
                 serde_json::from_str(&headers_str).unwrap_or_default();
