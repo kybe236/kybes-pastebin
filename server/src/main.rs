@@ -283,12 +283,12 @@ async fn get_pastes(
     let admin = is_admin(&pool, &body.token).await;
 
     let rows = if admin {
-        sqlx::query("SELECT id, content, headers FROM pastes")
+        sqlx::query("SELECT id, headers FROM pastes")
             .fetch_all(&pool)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     } else {
-        sqlx::query("SELECT id, content, headers FROM pastes WHERE owner_token = ?")
+        sqlx::query("SELECT id, headers FROM pastes WHERE owner_token = ?")
             .bind(&body.token)
             .fetch_all(&pool)
             .await
@@ -298,7 +298,6 @@ async fn get_pastes(
     let mut result = Vec::new();
     for row in rows {
         let id: String = row.get("id");
-        let content: Vec<u8> = row.get("content");
         let headers_str: String = row.get("headers");
         let headers =
             serde_json::from_str::<HashMap<String, String>>(&headers_str).unwrap_or_default();
@@ -313,7 +312,6 @@ async fn get_pastes(
 
         result.push(json!({
             "id": id,
-            "content": String::from_utf8_lossy(&content),
             "headers": headers,
             "aliases": aliases,
         }));
@@ -456,7 +454,7 @@ struct TokenInput {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = SqlitePool::connect("sqlite:db.db").await?;
+    let pool = SqlitePool::connect("sqlite:db.db?mode=rwc").await?;
 
     setup_database(&pool).await?;
 
